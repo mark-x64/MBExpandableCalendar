@@ -30,8 +30,13 @@ private final class MonthRowsCache: @unchecked Sendable {
         for day in range {
             days.append(cal.date(from: DateComponents(year: comps.year, month: comps.month, day: day)))
         }
-        while days.count < 42 { days.append(nil) }
-        let result = stride(from: 0, to: 42, by: 7).map { Array(days[$0..<$0 + 7]) }
+        // Pad to complete last row only (actual row count: 4–6)
+        let remainder = days.count % 7
+        if remainder != 0 {
+            days.append(contentsOf: Array(repeating: nil as Date?, count: 7 - remainder))
+        }
+        let total = days.count
+        let result = stride(from: 0, to: total, by: 7).map { Array(days[$0..<$0 + 7]) }
         store[key] = result
         return result
     }
@@ -55,6 +60,8 @@ public struct CompactCalendarView: View {
     public var collapse: CGFloat
     public var isDraggingVertically: Bool
     public var suppressTap: Bool
+    public var referenceDate: Date
+    public var onContinuousRowCountChange: (@MainActor @Sendable (CGFloat) -> Void)?
 
     public init(
         selectedDate: Binding<Date>,
@@ -62,7 +69,9 @@ public struct CompactCalendarView: View {
         overscaleAnchor: UnitPoint = .center,
         collapse: CGFloat = 0,
         isDraggingVertically: Bool = false,
-        suppressTap: Bool = false
+        suppressTap: Bool = false,
+        referenceDate: Date = Date(),
+        onContinuousRowCountChange: (@MainActor @Sendable (CGFloat) -> Void)? = nil
     ) {
         self._selectedDate = selectedDate
         self.badgeCount = badgeCount
@@ -70,6 +79,9 @@ public struct CompactCalendarView: View {
         self.collapse = collapse
         self.isDraggingVertically = isDraggingVertically
         self.suppressTap = suppressTap
+        self.referenceDate = referenceDate
+        self.onContinuousRowCountChange = onContinuousRowCountChange
+        _baseMonth = State(initialValue: referenceDate)
     }
 
     // Horizontal paging: wide LazyHStack, no reset needed
@@ -77,7 +89,7 @@ public struct CompactCalendarView: View {
     private static let centerPage = pageRadius
     private static let pageRange = 0...(pageRadius * 2)
 
-    @State private var baseMonth = Date()
+    @State private var baseMonth: Date
     @State private var currentPage: Int? = centerPage
     @State private var rowsCache = MonthRowsCache()
 
@@ -102,6 +114,10 @@ public struct CompactCalendarView: View {
         }
         .padding(.horizontal)
         .scaleEffect(y: overscaleY, anchor: overscaleAnchor)
+        .onAppear {
+            let count = CGFloat(rowsCache.rows(for: displayDate).count)
+            onContinuousRowCountChange?(count)
+        }
     }
 
     // MARK: Header
@@ -162,6 +178,12 @@ public struct CompactCalendarView: View {
         .scrollDisabled(isDraggingVertically)
         .scrollClipDisabled()
         .frame(height: gridHeight)
+        .onScrollGeometryChange(for: PagerMetrics.self) { geo in
+            PagerMetrics(offsetX: geo.contentOffset.x, pageWidth: geo.containerSize.width)
+        } action: { _, newValue in
+            let interpolated = interpolateRowCount(offsetX: newValue.offsetX, pageWidth: newValue.pageWidth)
+            onContinuousRowCountChange?(interpolated)
+        }
     }
 
     // MARK: Single Page
@@ -249,12 +271,25 @@ public struct CompactCalendarView: View {
 
     // MARK: - Layout
 
-    /// The current grid height based on collapse progress.
+    /// The current grid height based on collapse progress (clamped to 0…1).
+    /// Uses actual row count for the displayed month.
     public var gridHeight: CGFloat {
-        let monthH = cellH * 6
+        let ec = effectiveCollapse
+        let rows = CGFloat(Self.computeRowCount(for: displayDate))
+        let monthH = cellH * rows
         let weekH = cellH
-        let h = weekH + (monthH - weekH) * (1 - collapse)
-        return max(weekH * 0.6, h)
+        return weekH + (monthH - weekH) * (1 - ec)
+    }
+
+    /// Row count for the month containing `date`, without allocating the full row array.
+    private static func computeRowCount(for date: Date) -> Int {
+        let cal = Calendar.current
+        let comps = cal.dateComponents([.year, .month], from: date)
+        let firstOfMonth = cal.date(from: comps)!
+        let range = cal.range(of: .day, in: .month, for: firstOfMonth)!
+        let firstWD = cal.component(.weekday, from: firstOfMonth)
+        let offset = (firstWD - cal.firstWeekday + 7) % 7
+        return (offset + range.count + 6) / 7
     }
 
     private var overscaleY: CGFloat {
@@ -264,6 +299,26 @@ public struct CompactCalendarView: View {
             return 1 - (collapse - 1) * 0.15
         }
         return 1
+    }
+
+    // MARK: - Row Count Interpolation
+
+    private struct PagerMetrics: Equatable {
+        var offsetX: CGFloat
+        var pageWidth: CGFloat
+    }
+
+    private func interpolateRowCount(offsetX: CGFloat, pageWidth: CGFloat) -> CGFloat {
+        guard pageWidth > 0 else { return CGFloat(Self.computeRowCount(for: displayDate)) }
+        let fractionalPage = offsetX / pageWidth
+        guard fractionalPage > 0 else { return CGFloat(Self.computeRowCount(for: displayDate)) }
+        let leftIdx = max(Self.pageRange.lowerBound, min(Int(floor(fractionalPage)), Self.pageRange.upperBound))
+        let rightIdx = min(leftIdx + 1, Self.pageRange.upperBound)
+        let fraction = max(0, min(fractionalPage - CGFloat(leftIdx), 1))
+
+        let leftCount = CGFloat(Self.computeRowCount(for: dateForPage(leftIdx)))
+        let rightCount = CGFloat(Self.computeRowCount(for: dateForPage(rightIdx)))
+        return leftCount + (rightCount - leftCount) * fraction
     }
 
     // MARK: - Row Helpers
