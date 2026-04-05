@@ -1,8 +1,18 @@
 # MBExpandableCalendar
 
+[中文](README.zh-CN.md)
+
 A SwiftUI calendar component that smoothly collapses from **month view** to **week view** via drag gesture, with horizontal paging and badge support.
 
-<!-- Screenshots will be added via the in-app Developer screenshot exporter -->
+## Screenshots
+
+| Screenshots | Description |
+|:---:|---|
+| <img src="Assets/Screenshots/01-expanded-light.png" width="160"> <img src="Assets/Screenshots/02-expanded-dark.png" width="160"> | **Month View** — Full month grid with per-date badge counts. Adapts to 4–6 row months. Supports light and dark mode. |
+| <img src="Assets/Screenshots/03-collapsed-light.png" width="160"> <img src="Assets/Screenshots/04-collapsed-dark.png" width="160"> | **Week View (Collapsed)** — Collapses to a single-week strip via drag gesture. Spring-animated, rubber-band overscroll feel. |
+| <img src="Assets/Screenshots/05-4-rows.png" width="160"> <img src="Assets/Screenshots/06-6-rows.png" width="160"> | **Variable Row Count** — 4-row vs 6-row months. The calendar height animates smoothly as the month changes. |
+| <img src="Assets/Screenshots/07-no-radius-no-shadow.png" width="160"> <img src="Assets/Screenshots/08-radius-no-shadow.png" width="160"> | **Content Styling** — The content area below the calendar is fully composable. Left: flat edge-to-edge style. Right: rounded card with no shadow. |
+| <img src="Assets/Screenshots/09-custom-list.png" width="160"> | **Custom Content** — Bring your own list. Any SwiftUI view works as the scrollable content area beneath the calendar. |
 
 ## Features
 

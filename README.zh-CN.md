@@ -1,8 +1,18 @@
 # MBExpandableCalendar
 
+[English](README.md)
+
 一个 SwiftUI 日历组件，支持通过拖拽手势在**月视图**和**周视图**之间平滑折叠切换，带水平翻页和徽章角标。
 
-<!-- 截图通过 App 内的「开发者」截图导出器生成 -->
+## 截图
+
+| 截图 | 说明 |
+|:---:|---|
+| <img src="Assets/Screenshots/01-expanded-light.png" width="160"> <img src="Assets/Screenshots/02-expanded-dark.png" width="160"> | **月视图（展开）** — 完整月份网格，每个日期支持角标计数。自适应 4–6 行月份，支持浅色和深色模式。 |
+| <img src="Assets/Screenshots/03-collapsed-light.png" width="160"> <img src="Assets/Screenshots/04-collapsed-dark.png" width="160"> | **周视图（折叠）** — 通过拖拽手势折叠为单行周视图，弹簧动画 + 橡皮筋回弹效果。 |
+| <img src="Assets/Screenshots/05-4-rows.png" width="160"> <img src="Assets/Screenshots/06-6-rows.png" width="160"> | **行数自适应** — 4 行月份与 6 行月份对比。切换月份时日历高度平滑动画过渡。 |
+| <img src="Assets/Screenshots/07-no-radius-no-shadow.png" width="160"> <img src="Assets/Screenshots/08-radius-no-shadow.png" width="160"> | **内容区样式** — 日历下方的内容区完全可组合。左：无圆角无阴影的边到边布局；右：有圆角、无阴影的卡片样式。 |
+| <img src="Assets/Screenshots/09-custom-list.png" width="160"> | **自定义内容** — 任意 SwiftUI 视图均可作为日历下方的可滚动内容区域。 |
 
 ## 特性
 
