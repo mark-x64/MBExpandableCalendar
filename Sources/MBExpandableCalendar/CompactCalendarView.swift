@@ -61,7 +61,13 @@ public struct CompactCalendarView: View {
     public var isDraggingVertically: Bool
     public var suppressTap: Bool
     public var referenceDate: Date
+    /// When set, overrides the grid height computation so the container can
+    /// drive a smooth height animation independently of `currentPage`.
+    public var rowCountOverride: CGFloat?
     public var onContinuousRowCountChange: (@MainActor @Sendable (CGFloat) -> Void)?
+    /// Called when the user taps a prev/next button, with the target month's row count.
+    /// The container should animate its height to match (vs. the continuous-scroll path).
+    public var onButtonNavigate: (@MainActor @Sendable (CGFloat) -> Void)?
 
     public init(
         selectedDate: Binding<Date>,
@@ -71,7 +77,9 @@ public struct CompactCalendarView: View {
         isDraggingVertically: Bool = false,
         suppressTap: Bool = false,
         referenceDate: Date = Date(),
-        onContinuousRowCountChange: (@MainActor @Sendable (CGFloat) -> Void)? = nil
+        rowCountOverride: CGFloat? = nil,
+        onContinuousRowCountChange: (@MainActor @Sendable (CGFloat) -> Void)? = nil,
+        onButtonNavigate: (@MainActor @Sendable (CGFloat) -> Void)? = nil
     ) {
         self._selectedDate = selectedDate
         self.badgeCount = badgeCount
@@ -80,7 +88,9 @@ public struct CompactCalendarView: View {
         self.isDraggingVertically = isDraggingVertically
         self.suppressTap = suppressTap
         self.referenceDate = referenceDate
+        self.rowCountOverride = rowCountOverride
         self.onContinuousRowCountChange = onContinuousRowCountChange
+        self.onButtonNavigate = onButtonNavigate
         _baseMonth = State(initialValue: referenceDate)
     }
 
@@ -264,18 +274,23 @@ public struct CompactCalendarView: View {
     }
 
     private func navigateAnimated(forward: Bool) {
+        let newPage = (currentPage ?? Self.centerPage) + (forward ? 1 : -1)
+        let newDate = dateForPage(newPage)
+        let newCount = CGFloat(Self.computeRowCount(for: newDate))
+        onButtonNavigate?(newCount)
         withAnimation(.spring(.bouncy)) {
-            currentPage = (currentPage ?? Self.centerPage) + (forward ? 1 : -1)
+            currentPage = newPage
         }
     }
 
     // MARK: - Layout
 
     /// The current grid height based on collapse progress (clamped to 0…1).
-    /// Uses actual row count for the displayed month.
+    /// Uses `rowCountOverride` when set (container-driven animation), otherwise
+    /// computes from the displayed month's actual row count.
     public var gridHeight: CGFloat {
         let ec = effectiveCollapse
-        let rows = CGFloat(Self.computeRowCount(for: displayDate))
+        let rows = rowCountOverride ?? CGFloat(Self.computeRowCount(for: displayDate))
         let monthH = cellH * rows
         let weekH = cellH
         return weekH + (monthH - weekH) * (1 - ec)

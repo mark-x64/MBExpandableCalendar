@@ -132,16 +132,41 @@ public struct ExpandableCalendarContainer<Content: View>: UIViewControllerRepres
         vc.initialCollapse = initialCollapse
         vc.drawerBackgroundColor = drawerBackgroundColor
 
-        vc.setCalendar(AnyView(CompactCalendarView(
-            selectedDate: $selectedDate, badgeCount: badgeCount,
-            overscaleAnchor: .top, collapse: c.collapse,
-            isDraggingVertically: vc.isDraggingCalendar,
-            suppressTap: vc.isDraggingCalendar,
-            referenceDate: referenceDate,
-            onContinuousRowCountChange: { [weak vc] count in
-                vc?.handleContinuousRowCountChange(count)
-            }
-        )))
+        // Rebuild the factory closure with current bindings/params.
+        // navAnimTick calls this each frame to push a rowCountOverride into the
+        // SwiftUI calendar, keeping gridHeight in lockstep with mask/inset.
+        let binding = $selectedDate
+        let badgeFn = badgeCount
+        let refDate = referenceDate
+        vc.makeCalendarView = { [weak vc] rowCountOverride in
+            guard let vc = vc else { return AnyView(EmptyView()) }
+            let offset = vc.scrollView.contentOffset.y + vc.scrollView.contentInset.top
+            let cr = vc.collapseRange
+            // Allow negative values (overscroll past top) — that's what drives the
+            // rubber-band overscale effect in CompactCalendarView.overscaleY.
+            let collapse: CGFloat = cr > 0 ? min(offset / cr, 1) : 0
+            return AnyView(CompactCalendarView(
+                selectedDate: binding,
+                badgeCount: badgeFn,
+                overscaleAnchor: .top,
+                collapse: collapse,
+                isDraggingVertically: vc.isDraggingCalendar,
+                suppressTap: vc.isDraggingCalendar,
+                referenceDate: refDate,
+                rowCountOverride: rowCountOverride,
+                onContinuousRowCountChange: { [weak vc] count in
+                    vc?.handleContinuousRowCountChange(count)
+                },
+                onButtonNavigate: { [weak vc] count in
+                    vc?.animateRowCountChange(to: count)
+                }
+            ))
+        }
+
+        // Use the current override (non-nil while button-nav animation is running).
+        if let makeView = vc.makeCalendarView {
+            vc.setCalendar(makeView(vc.navAnimRowCountOverride))
+        }
         vc.setContent(AnyView(content(selectedDate)))
     }
 
@@ -159,16 +184,8 @@ public struct ExpandableCalendarContainer<Content: View>: UIViewControllerRepres
             let offset = scrollView.contentOffset.y + scrollView.contentInset.top
             collapse = vc.collapseRange > 0 ? min(offset / vc.collapseRange, 1) : 0
 
-            if !vc.isUpdatingFromHorizontalSwipe {
-                vc.setCalendar(AnyView(CompactCalendarView(
-                    selectedDate: parent.$selectedDate, badgeCount: parent.badgeCount,
-                    overscaleAnchor: .top, collapse: collapse,
-                    isDraggingVertically: vc.isDraggingCalendar,
-                    suppressTap: vc.isDraggingCalendar,
-                    onContinuousRowCountChange: { [weak vc] count in
-                        vc?.handleContinuousRowCountChange(count)
-                    }
-                )))
+            if !vc.isUpdatingFromHorizontalSwipe, let makeView = vc.makeCalendarView {
+                vc.setCalendar(makeView(vc.navAnimRowCountOverride))
                 vc.calendarHC?.view.invalidateIntrinsicContentSize()
                 vc.calendarHC?.view.layoutIfNeeded()
             }
@@ -248,6 +265,22 @@ public final class CalendarContainerVC: UIViewController {
     private var panStartOffset: CGFloat = 0
     private var calendarPanIsVertical = false
     var isDraggingCalendar = false
+
+    // Button-navigation height animation (CADisplayLink driven)
+    private var navAnimLink: CADisplayLink?
+    private var navAnimStart: CFTimeInterval = 0
+    private var navAnimFrom: CGFloat = 0
+    private var navAnimTo: CGFloat = 0
+    private var navAnimCollapseFrac: CGFloat = 0
+    private let navAnimDuration: CFTimeInterval = 0.42
+
+    // Factory closure set by updateUIViewController so navAnimTick can rebuild the
+    // calendar view with a rowCountOverride each frame without knowing the parameters.
+    // Signature: (rowCountOverride: CGFloat?) -> AnyView
+    var makeCalendarView: ((CGFloat?) -> AnyView)?
+    /// Currently active rowCount override – kept in sync with navAnimTick and read
+    /// by updateUIViewController / scrollViewDidScroll so they don't clobber it.
+    private(set) var navAnimRowCountOverride: CGFloat? = nil
 
     // MARK: viewDidLoad
 
@@ -546,6 +579,25 @@ public final class CalendarContainerVC: UIViewController {
     func handleContinuousRowCountChange(_ newCount: CGFloat) {
         guard baseCalH > 0, insetConfigured else { return }
         guard abs(newCount - currentInterpolatedRowCount) > 0.01 else { return }
+        // While a button-nav animation is running, onScrollGeometryChange fires with
+        // intermediate values as the pager spring-scrolls toward the new page — those
+        // values converge toward navAnimTo (and may briefly overshoot by ≤0.5 rows).
+        // Keep the animation running unless the value is far from the target AND
+        // diverging, which indicates a genuine user swipe toward a different month.
+        if navAnimLink != nil {
+            let distNow = abs(newCount - navAnimTo)
+            let distWas = abs(currentInterpolatedRowCount - navAnimTo)
+            if distNow <= 0.5 || distNow <= distWas + 0.01 { return }  // converging or within overshoot tolerance
+            // User swiped away — cancel button-nav animation and clear the override.
+            navAnimLink?.invalidate()
+            navAnimLink = nil
+            navAnimRowCountOverride = nil
+            if let makeView = makeCalendarView {
+                setCalendar(makeView(nil))
+                calendarHC?.view.invalidateIntrinsicContentSize()
+                calendarHC?.view.layoutIfNeeded()
+            }
+        }
         let cellH: CGFloat = 44
         let newVisibleCalH = baseCalH + newCount * cellH + drawerOffset
         let newCollapseRange = (newCount - 1) * cellH
@@ -566,6 +618,73 @@ public final class CalendarContainerVC: UIViewController {
         isUpdatingFromHorizontalSwipe = false
 
         updateMask()
+    }
+    // MARK: Button-Navigation Height Animation
+
+    func animateRowCountChange(to newCount: CGFloat) {
+        guard baseCalH > 0, insetConfigured else { return }
+        guard abs(newCount - currentInterpolatedRowCount) > 0.01 else { return }
+
+        let scrollOffset = scrollView.contentOffset.y + scrollView.contentInset.top
+        let oldCR = collapseRange
+        navAnimCollapseFrac = oldCR > 0 ? min(max(scrollOffset / oldCR, 0), 1) : 0
+        navAnimFrom = currentInterpolatedRowCount
+        navAnimTo = newCount
+        navAnimStart = CACurrentMediaTime()
+
+        // Set override immediately so the SwiftUI view's gridHeight doesn't jump on
+        // the first render pass after currentPage changes (before the first tick fires).
+        navAnimRowCountOverride = navAnimFrom
+        if let makeView = makeCalendarView {
+            setCalendar(makeView(navAnimFrom))
+        }
+
+        navAnimLink?.invalidate()
+        let link = CADisplayLink(target: self, selector: #selector(navAnimTick))
+        link.add(to: .main, forMode: .common)
+        navAnimLink = link
+    }
+
+    @objc private func navAnimTick() {
+        let elapsed = CACurrentMediaTime() - navAnimStart
+        let raw = min(elapsed / navAnimDuration, 1.0)
+        let t = 1 - pow(1 - raw, 3)   // ease-out cubic
+        let cellH: CGFloat = 44
+        let count = navAnimFrom + (navAnimTo - navAnimFrom) * t
+
+        // Drive all three height-dependent elements from the same `count` value so
+        // gridHeight (SwiftUI), calendarBg (UIKit constraint), and mask/inset all
+        // animate in perfect lockstep with no visual mismatch.
+        navAnimRowCountOverride = count
+        currentInterpolatedRowCount = count
+        collapseRange = max((count - 1) * cellH, 0)
+
+        // Push rowCountOverride into the SwiftUI calendar view so gridHeight follows
+        // this ease-out curve instead of jumping when displayDate changes.
+        if let makeView = makeCalendarView {
+            setCalendar(makeView(count))
+            calendarHC?.view.invalidateIntrinsicContentSize()
+            // Force UIKit to re-layout now so calendarBg tracks hc.view synchronously.
+            view.layoutIfNeeded()
+        }
+
+        let newVisibleCalH = baseCalH + count * cellH + drawerOffset
+        isUpdatingFromHorizontalSwipe = true
+        scrollView.contentInset.top = newVisibleCalH
+        scrollView.contentOffset.y = navAnimCollapseFrac * collapseRange - newVisibleCalH
+        isUpdatingFromHorizontalSwipe = false
+
+        updateMask()
+
+        if raw >= 1.0 {
+            navAnimLink?.invalidate()
+            navAnimLink = nil
+            // Clear the override so normal scroll-driven updates resume.
+            navAnimRowCountOverride = nil
+            if let makeView = makeCalendarView {
+                setCalendar(makeView(nil))
+            }
+        }
     }
 }
 
