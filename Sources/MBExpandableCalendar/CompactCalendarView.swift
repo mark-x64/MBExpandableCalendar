@@ -185,9 +185,10 @@ public struct CompactCalendarView: View {
         }
         .scrollTargetBehavior(.paging)
         .scrollPosition(id: $currentPage)
-        .scrollDisabled(isDraggingVertically)
+        .scrollDisabled(isDraggingVertically || effectiveCollapse > 0.99)
         .scrollClipDisabled()
         .frame(height: gridHeight)
+        .simultaneousGesture(weekSwipeGesture)
         .onScrollGeometryChange(for: PagerMetrics.self) { geo in
             PagerMetrics(offsetX: geo.contentOffset.x, pageWidth: geo.containerSize.width)
         } action: { _, newValue in
@@ -264,6 +265,32 @@ public struct CompactCalendarView: View {
                 guard !suppressTap else { return }
                 selectedDate = date
             }
+    }
+
+    // MARK: - Week Swipe (collapsed state)
+
+    private var weekSwipeGesture: some Gesture {
+        DragGesture(minimumDistance: 15)
+            .onEnded { value in
+                guard effectiveCollapse > 0.99 else { return }
+                guard abs(value.translation.width) > abs(value.translation.height) else { return }
+                guard abs(value.translation.width) > 30 else { return }
+                advanceWeek(forward: value.translation.width < 0)
+            }
+    }
+
+    private func advanceWeek(forward: Bool) {
+        let delta = forward ? 7 : -7
+        guard let newDate = cal.date(byAdding: .day, value: delta, to: selectedDate) else { return }
+        let oldPage = currentPage ?? Self.centerPage
+        let oldMonth = dateForPage(oldPage)
+        let crossedMonth = !cal.isDate(newDate, equalTo: oldMonth, toGranularity: .month)
+        withAnimation(.spring(.bouncy)) {
+            selectedDate = newDate
+            if crossedMonth {
+                currentPage = oldPage + (forward ? 1 : -1)
+            }
+        }
     }
 
     // MARK: - Navigation
