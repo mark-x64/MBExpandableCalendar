@@ -9,6 +9,13 @@
 
 import SwiftUI
 
+/// Demo content style: stock SwiftUI `List` (introduces a nested
+/// scroll view) vs. plain `LazyVStack` (single scroll, recommended).
+public enum MBDemoContentStyle: String, CaseIterable, Sendable {
+    case list = "List (nested scroll)"
+    case lazyVStack = "LazyVStack (single scroll)"
+}
+
 public struct MBExpandableCalendarDemoView: View {
 
     @State private var selectedDate = Date()
@@ -16,7 +23,11 @@ public struct MBExpandableCalendarDemoView: View {
     @State private var shadowEnabled = true
     @State private var collapsed = false
 
-    public init() {}
+    private let contentStyle: MBDemoContentStyle
+
+    public init(contentStyle: MBDemoContentStyle = .list) {
+        self.contentStyle = contentStyle
+    }
 
     public var body: some View {
         let cornerRadius: CGFloat = roundedCorners ? 24 : 0
@@ -32,19 +43,12 @@ public struct MBExpandableCalendarDemoView: View {
                 contentCornerRadius: cornerRadius,
                 initialCollapse: collapsed ? 1 : 0
             ) { date in
-                List {
-                    Section("Selected") {
-                        Text(date, format: .dateTime.year().month(.wide).day().weekday(.wide))
-                            .font(.headline)
-                    }
-                    Section("Demo items") {
-                        ForEach(0..<12) { i in
-                            Label("Task \(i + 1)", systemImage: "checkmark.circle")
-                        }
-                    }
+                switch contentStyle {
+                case .list:
+                    listContent(for: date)
+                case .lazyVStack:
+                    lazyVStackContent(for: date)
                 }
-                .listStyle(.insetGrouped)
-                .scrollContentBackground(.hidden)
             }
             .drawerShadow(
                 color: shadowEnabled ? Color.black.opacity(0.18) : .clear,
@@ -62,6 +66,55 @@ public struct MBExpandableCalendarDemoView: View {
         }
     }
 
+    // MARK: - Content variants
+
+    @ViewBuilder
+    private func listContent(for date: Date) -> some View {
+        List {
+            Section("Selected") {
+                Text(date, format: .dateTime.year().month(.wide).day().weekday(.wide))
+                    .font(.headline)
+            }
+            Section("Demo items") {
+                ForEach(0..<30) { i in
+                    Label("Task \(i + 1)", systemImage: "checkmark.circle")
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .scrollContentBackground(.hidden)
+    }
+
+    @ViewBuilder
+    private func lazyVStackContent(for date: Date) -> some View {
+        LazyVStack(alignment: .leading, spacing: 0) {
+            Text(date, format: .dateTime.year().month(.wide).day().weekday(.wide))
+                .font(.headline)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 16)
+
+            Text("Demo items")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 20)
+                .padding(.bottom, 8)
+
+            VStack(spacing: 0) {
+                ForEach(0..<30) { i in
+                    Label("Task \(i + 1)", systemImage: "checkmark.circle")
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 12)
+                    if i < 29 {
+                        Divider().padding(.leading, 44)
+                    }
+                }
+            }
+            .background(Color(.secondarySystemGroupedBackground), in: .rect(cornerRadius: 10))
+            .padding(.horizontal, 16)
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
     private var controls: some View {
         VStack(alignment: .leading, spacing: 8) {
             Toggle("Rounded corners", isOn: $roundedCorners)
@@ -72,6 +125,10 @@ public struct MBExpandableCalendarDemoView: View {
     }
 }
 
-#Preview("MBExpandableCalendar Demo") {
-    MBExpandableCalendarDemoView()
+#Preview("Demo · List (nested scroll)") {
+    MBExpandableCalendarDemoView(contentStyle: .list)
+}
+
+#Preview("Demo · LazyVStack (single scroll)") {
+    MBExpandableCalendarDemoView(contentStyle: .lazyVStack)
 }

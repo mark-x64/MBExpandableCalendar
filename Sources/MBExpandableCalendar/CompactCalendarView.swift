@@ -158,8 +158,11 @@ public struct CompactCalendarView: View {
 
     private var weekdayBar: some View {
         HStack(spacing: 0) {
-            ForEach(weekdaySymbols, id: \.self) { s in
-                Text(s)
+            // Use index as id: veryShortStandaloneWeekdaySymbols contains
+            // duplicates in some locales (e.g. "S" for Sat/Sun in English),
+            // and ForEach with `id: \.self` on duplicates is undefined behavior.
+            ForEach(weekdaySymbols.indices, id: \.self) { i in
+                Text(weekdaySymbols[i])
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity)

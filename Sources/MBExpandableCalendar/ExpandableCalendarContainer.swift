@@ -176,31 +176,61 @@ public struct ExpandableCalendarContainer<Content: View>: UIViewControllerRepres
         var parent: ExpandableCalendarContainer
         weak var vc: CalendarContainerVC?
         private(set) var collapse: CGFloat = 0
+        private var lastPushedCollapse: CGFloat = -2  // sentinel; first call always pushes
+        private var dragStartedInCollapseZone: Bool = false
 
         init(parent: ExpandableCalendarContainer) { self.parent = parent }
 
         public func scrollViewDidScroll(_ scrollView: UIScrollView) {
             guard let vc else { return }
             let offset = scrollView.contentOffset.y + scrollView.contentInset.top
-            collapse = vc.collapseRange > 0 ? min(offset / vc.collapseRange, 1) : 0
+            let cr = vc.collapseRange
+            let newCollapse: CGFloat = cr > 0 ? min(offset / cr, 1) : 0
+            collapse = newCollapse
 
-            if !vc.isUpdatingFromHorizontalSwipe, let makeView = vc.makeCalendarView {
+            // Only rebuild the calendar view when the collapse value actually
+            // changes. Without this guard, every scroll frame past the collapse
+            // range (i.e. while scrolling the list) would still pay the cost of
+            // hc.rootView reassignment, layoutIfNeeded, and an autolayout pass —
+            // amplifying into deceleration jank and the mid-decel "reset to
+            // bottom" you saw before. Drop layoutIfNeeded too: forcing layout
+            // every frame was the loudest jank source.
+            let changed = abs(newCollapse - lastPushedCollapse) > 0.005
+            if changed && !vc.isUpdatingFromHorizontalSwipe, let makeView = vc.makeCalendarView {
                 vc.setCalendar(makeView(vc.navAnimRowCountOverride))
-                vc.calendarHC?.view.invalidateIntrinsicContentSize()
-                vc.calendarHC?.view.layoutIfNeeded()
+                lastPushedCollapse = newCollapse
             }
             vc.updateMask()
+        }
+
+        public func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+            guard let vc else { return }
+            // Permanently stop re-pinning the initial inset/offset once the
+            // user has actually touched the scroll view.
+            vc.userHasInteracted = true
+            // Only allow snap when the user actually started inside the collapse
+            // zone. Otherwise list-area scrolling whose decel target happens to
+            // land in [0, cr) gets yanked back to the boundary — perceived as a
+            // sudden "reset to bottom" jump.
+            let inset = scrollView.contentInset.top
+            let pos = scrollView.contentOffset.y + inset
+            dragStartedInCollapseZone = pos >= 0 && pos <= vc.collapseRange
         }
 
         public func scrollViewWillEndDragging(
             _ scrollView: UIScrollView, withVelocity v: CGPoint,
             targetContentOffset t: UnsafeMutablePointer<CGPoint>
         ) {
+            guard dragStartedInCollapseZone else { return }
             let cr = vc?.collapseRange ?? 220
             let inset = scrollView.contentInset.top
             let target = t.pointee.y + inset
             guard target >= 0, target < cr else { return }
             t.pointee.y = (target < cr / 2 ? 0 : cr) - inset
+        }
+
+        public func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+            dragStartedInCollapseZone = false
         }
     }
 
@@ -230,10 +260,10 @@ public final class CalendarContainerVC: UIViewController {
         didSet {
             guard oldValue != drawerOffset, baseCalH > 0, insetConfigured else { return }
             let scrollOffset = scrollView.contentOffset.y + scrollView.contentInset.top
-            let visibleCalH = baseCalH + currentInterpolatedRowCount * 44 + drawerOffset
+            let visibleCalH = computeVisibleCalH()
             scrollView.contentInset.top = visibleCalH
             scrollView.contentOffset.y = scrollOffset - visibleCalH
-            contentMinHeightConstraint?.constant = -(baseCalH + 44 + drawerOffset)
+            contentMinHeightConstraint?.constant = -(safeTopInset + baseCalH + 44 + drawerOffset)
             updateMask()
         }
     }
@@ -259,6 +289,21 @@ public final class CalendarContainerVC: UIViewController {
     private var contentMinHeightConstraint: NSLayoutConstraint?
     private var currentInterpolatedRowCount: CGFloat = 6
     var isUpdatingFromHorizontalSwipe = false
+    /// Latches the first time the user touches the scroll view.
+    var userHasInteracted = false
+    /// Safe-area top inset at the time the scroll view's inset was configured.
+    /// Calendar hc.view is pinned to `safeAreaLayoutGuide.topAnchor`, but the
+    /// scroll view is pinned to `view.topAnchor` (ignoring safe area). For the
+    /// content top to line up with the calendar bottom, contentInset.top must
+    /// be = safeAreaTop + monthCalH + drawerOffset.
+    private var safeTopInset: CGFloat = 0
+
+    /// Single source of truth for the "visible calendar height" = y coordinate
+    /// in the view where the drawer (and content) should start.
+    private func computeVisibleCalH() -> CGFloat {
+        let cellH: CGFloat = 44
+        return safeTopInset + baseCalH + currentInterpolatedRowCount * cellH + drawerOffset
+    }
 
     // Calendar pan gesture → scroll driving
     private var calendarPanGR: UIPanGestureRecognizer?
@@ -376,6 +421,13 @@ public final class CalendarContainerVC: UIViewController {
             let hc = UIHostingController(rootView: rootView)
             hc.view.backgroundColor = .clear
             hc.view.translatesAutoresizingMaskIntoConstraints = false
+            // Disable hc's automatic safe-area handling so the SwiftUI content
+            // fills hc.view edge-to-edge. We manage inset/offset ourselves.
+            hc.safeAreaRegions = []
+            // Use intrinsic content sizing so hc.view.height follows SwiftUI's
+            // natural measurement instead of the circular self-sizing
+            // negotiation between autolayout and SwiftUI.
+            hc.sizingOptions = .intrinsicContentSize
             addChild(hc); scrollView.addSubview(hc.view); hc.didMove(toParent: self)
             contentHC = hc
 
@@ -383,10 +435,19 @@ public final class CalendarContainerVC: UIViewController {
             contentMinHeightConstraint = minH
 
             NSLayoutConstraint.activate([
+                // Apple-standard UIScrollView content layout: pin ALL four
+                // edges to contentLayoutGuide (forming the scrollable content
+                // bounds), plus an explicit widthAnchor == frameLayoutGuide.width
+                // to disable horizontal scroll. The previous setup pinned
+                // leading/trailing to frameLayoutGuide which left
+                // contentLayoutGuide with no horizontal anchors → contentSize.width
+                // ended up as 0, which can confuse UIScrollView's internal
+                // scrollable-range calculation.
                 hc.view.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor),
-                hc.view.leadingAnchor.constraint(equalTo: scrollView.frameLayoutGuide.leadingAnchor),
-                hc.view.trailingAnchor.constraint(equalTo: scrollView.frameLayoutGuide.trailingAnchor),
+                hc.view.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor),
+                hc.view.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor),
                 hc.view.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor),
+                hc.view.widthAnchor.constraint(equalTo: scrollView.frameLayoutGuide.widthAnchor),
                 minH,
             ])
         }
@@ -398,18 +459,79 @@ public final class CalendarContainerVC: UIViewController {
         super.viewDidLayoutSubviews()
         measureCalendarIfNeeded()
         configureInsetIfNeeded()
+        if !userHasInteracted {
+            pinInitialOffsetIfIdle()
+        }
         updateMask()
     }
 
     public override func viewIsAppearing(_ animated: Bool) {
         super.viewIsAppearing(animated)
+        measureCalendarIfNeeded()
         configureInsetIfNeeded()
+        if !userHasInteracted {
+            pinInitialOffsetIfIdle()
+        }
         updateMask()
+    }
+
+    public override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        if !userHasInteracted {
+            pinInitialOffsetIfIdle()
+        }
+        updateMask()
+    }
+
+    /// Re-set contentInset AND contentOffset to the intended initial state if
+    /// the user is not currently interacting with the scroll view. Idempotent
+    /// and safe to call repeatedly. Critically, this does NOT gate on
+    /// `insetConfigured` — the goal is to recover from cases where UIKit's
+    /// layout cycle silently clobbered our contentInset.top back to 0, which
+    /// clamps the scrollable min offset to 0 and makes the top of the content
+    /// unreachable via downward drag.
+    private func pinInitialOffsetIfIdle() {
+        guard !userHasInteracted else { return }
+        guard baseCalH > 0 else { return }
+        guard !scrollView.isTracking && !scrollView.isDecelerating else { return }
+
+        let visibleCalH = computeVisibleCalH()
+        if abs(scrollView.contentInset.top - visibleCalH) > 0.5 {
+            scrollView.contentInset.top = visibleCalH
+            scrollView.verticalScrollIndicatorInsets.top = visibleCalH
+        }
+        let clamped = min(max(initialCollapse, 0), 1)
+        let target = clamped * collapseRange - visibleCalH
+        if abs(scrollView.contentOffset.y - target) > 0.5 {
+            scrollView.contentOffset.y = target
+        }
     }
 
     public override func viewSafeAreaInsetsDidChange() {
         super.viewSafeAreaInsetsDidChange()
+        // Safe-area top may become known after configureInsetIfNeeded already
+        // ran with an estimate of 0. Reconcile contentInset and contentOffset
+        // against the new value here.
+        let newSafeTop = view.safeAreaInsets.top
+        if insetConfigured {
+            scrollView.contentInset.bottom = view.safeAreaInsets.bottom
+        }
+        if insetConfigured && abs(newSafeTop - safeTopInset) > 0.5 {
+            let oldVisible = computeVisibleCalH()
+            let scrollOffset = scrollView.contentOffset.y + scrollView.contentInset.top
+            safeTopInset = newSafeTop
+            let newVisible = computeVisibleCalH()
+            scrollView.contentInset.top = newVisible
+            scrollView.verticalScrollIndicatorInsets.top = newVisible
+            contentMinHeightConstraint?.constant = -(safeTopInset + baseCalH + 44 + drawerOffset)
+            // Preserve scroll progress across the safe-area change.
+            scrollView.contentOffset.y = scrollOffset - newVisible
+            _ = oldVisible // silence warning
+        }
         configureInsetIfNeeded()
+        if !userHasInteracted {
+            pinInitialOffsetIfIdle()
+        }
         updateMask()
     }
 
@@ -418,7 +540,8 @@ public final class CalendarContainerVC: UIViewController {
         let w = view.bounds.width > 0 ? view.bounds.width : UIScreen.main.bounds.width
         var h = hc.sizeThatFits(in: CGSize(width: w, height: .greatestFiniteMagnitude)).height
         if h <= 10 {
-            hc.view.setNeedsLayout(); hc.view.layoutIfNeeded()
+            hc.view.setNeedsLayout()
+            hc.view.layoutIfNeeded()
             h = hc.view.frame.height
         }
         guard h > 10 else { return }
@@ -427,7 +550,6 @@ public final class CalendarContainerVC: UIViewController {
 
     private func configureInsetIfNeeded() {
         guard monthCalH > 0, !insetConfigured else { return }
-        guard view.window != nil else { return }
 
         let cellH: CGFloat = 44
         // Compute actual row count for the reference month.
@@ -443,12 +565,21 @@ public final class CalendarContainerVC: UIViewController {
         currentInterpolatedRowCount = CGFloat(rowCount)
         collapseRange = CGFloat(rowCount - 1) * cellH
 
-        // contentInset is based on the *visible* calendar height, not the full view height.
-        let visibleCalH = baseCalH + CGFloat(rowCount) * cellH + drawerOffset
+        // Capture the current safe-area top. calendarHC is pinned to the safe
+        // area, so contentInset must include it or content gets hidden behind
+        // calendar (and cannot be revealed, because offset is already at min).
+        safeTopInset = view.safeAreaInsets.top
+
+        let visibleCalH = computeVisibleCalH()
         scrollView.contentInset.top = visibleCalH
         scrollView.verticalScrollIndicatorInsets.top = visibleCalH
-        // Content min height: ensure drawer fills screen when collapsed (baseCalH + one row).
-        contentMinHeightConstraint?.constant = -(baseCalH + cellH + drawerOffset)
+        // Bottom inset: contentHC's hc.safeAreaRegions = [] tells SwiftUI not
+        // to reserve home-indicator space at the VStack bottom, so we must do
+        // it on the scroll view side. Without this, scrolling to max hides the
+        // last contentInset.bottom's worth of content under the home indicator.
+        scrollView.contentInset.bottom = view.safeAreaInsets.bottom
+        // Content min height: ensure drawer fills screen when collapsed.
+        contentMinHeightConstraint?.constant = -(safeTopInset + baseCalH + cellH + drawerOffset)
         insetConfigured = true
 
         // Apply initial collapse (0 = expanded, 1 = collapsed)
@@ -464,7 +595,7 @@ public final class CalendarContainerVC: UIViewController {
         let h = view.bounds.height
         guard w > 0 else { return }
 
-        let visibleCalH = baseCalH + currentInterpolatedRowCount * 44 + drawerOffset
+        let visibleCalH = computeVisibleCalH()
         let scrollOffset = scrollView.contentOffset.y + scrollView.contentInset.top
         let ec = collapseRange > 0 ? min(max(scrollOffset / collapseRange, 0), 1) : CGFloat(0)
         // When overscrolling past top (scrollOffset < 0), push drawer down with it
@@ -599,7 +730,7 @@ public final class CalendarContainerVC: UIViewController {
             }
         }
         let cellH: CGFloat = 44
-        let newVisibleCalH = baseCalH + newCount * cellH + drawerOffset
+        let newVisibleCalH = safeTopInset + baseCalH + newCount * cellH + drawerOffset
         let newCollapseRange = (newCount - 1) * cellH
 
         // Preserve collapse fraction across row-count changes.
@@ -668,7 +799,7 @@ public final class CalendarContainerVC: UIViewController {
             view.layoutIfNeeded()
         }
 
-        let newVisibleCalH = baseCalH + count * cellH + drawerOffset
+        let newVisibleCalH = safeTopInset + baseCalH + count * cellH + drawerOffset
         isUpdatingFromHorizontalSwipe = true
         scrollView.contentInset.top = newVisibleCalH
         scrollView.contentOffset.y = navAnimCollapseFrac * collapseRange - newVisibleCalH
