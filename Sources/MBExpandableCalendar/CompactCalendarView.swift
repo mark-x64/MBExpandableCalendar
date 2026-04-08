@@ -144,8 +144,7 @@ public struct CompactCalendarView: View {
             Spacer()
             Text(displayDate, format: .dateTime.year().month(.wide))
                 .font(.headline)
-                .contentTransition(.numericText())
-                .animation(.easeInOut(duration: 0.2), value: currentPage)
+                .transaction { $0.animation = nil }
             Spacer()
             Button { navigateAnimated(forward: true) } label: {
                 Image(systemName: "chevron.right")
