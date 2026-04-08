@@ -104,7 +104,7 @@ public struct CompactCalendarView: View {
     @State private var rowsCache = MonthRowsCache()
 
     private let cal = Calendar.current
-    private let cellH: CGFloat = 44
+    private let cellH = CalendarMetrics.cellHeight
 
     private let weekdaySymbols: [String] = {
         let s = Calendar.current.veryShortStandaloneWeekdaySymbols
@@ -328,13 +328,7 @@ public struct CompactCalendarView: View {
 
     /// Row count for the month containing `date`, without allocating the full row array.
     private static func computeRowCount(for date: Date) -> Int {
-        let cal = Calendar.current
-        let comps = cal.dateComponents([.year, .month], from: date)
-        let firstOfMonth = cal.date(from: comps)!
-        let range = cal.range(of: .day, in: .month, for: firstOfMonth)!
-        let firstWD = cal.component(.weekday, from: firstOfMonth)
-        let offset = (firstWD - cal.firstWeekday + 7) % 7
-        return (offset + range.count + 6) / 7
+        computeMonthRowCount(for: date)
     }
 
     private var overscaleY: CGFloat {

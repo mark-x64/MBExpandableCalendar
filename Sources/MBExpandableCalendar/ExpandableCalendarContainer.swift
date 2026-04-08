@@ -301,7 +301,7 @@ public final class CalendarContainerVC: UIViewController {
     /// Single source of truth for the "visible calendar height" = y coordinate
     /// in the view where the drawer (and content) should start.
     private func computeVisibleCalH() -> CGFloat {
-        let cellH: CGFloat = 44
+        let cellH = CalendarMetrics.cellHeight
         return safeTopInset + baseCalH + currentInterpolatedRowCount * cellH + drawerOffset
     }
 
@@ -551,15 +551,8 @@ public final class CalendarContainerVC: UIViewController {
     private func configureInsetIfNeeded() {
         guard monthCalH > 0, !insetConfigured else { return }
 
-        let cellH: CGFloat = 44
-        // Compute actual row count for the reference month.
-        let cal = Calendar.current
-        let comps = cal.dateComponents([.year, .month], from: referenceDate)
-        let firstOfMonth = cal.date(from: comps)!
-        let range = cal.range(of: .day, in: .month, for: firstOfMonth)!
-        let firstWD = cal.component(.weekday, from: firstOfMonth)
-        let offset = (firstWD - cal.firstWeekday + 7) % 7
-        let rowCount = (offset + range.count + 6) / 7
+        let cellH = CalendarMetrics.cellHeight
+        let rowCount = computeMonthRowCount(for: referenceDate)
         // gridHeight uses actual row count; baseCalH = non-grid portion.
         baseCalH = monthCalH - CGFloat(rowCount) * cellH
         currentInterpolatedRowCount = CGFloat(rowCount)
@@ -729,7 +722,7 @@ public final class CalendarContainerVC: UIViewController {
                 calendarHC?.view.layoutIfNeeded()
             }
         }
-        let cellH: CGFloat = 44
+        let cellH = CalendarMetrics.cellHeight
         let newVisibleCalH = safeTopInset + baseCalH + newCount * cellH + drawerOffset
         let newCollapseRange = (newCount - 1) * cellH
 
@@ -780,7 +773,7 @@ public final class CalendarContainerVC: UIViewController {
         let elapsed = CACurrentMediaTime() - navAnimStart
         let raw = min(elapsed / navAnimDuration, 1.0)
         let t = 1 - pow(1 - raw, 3)   // ease-out cubic
-        let cellH: CGFloat = 44
+        let cellH = CalendarMetrics.cellHeight
         let count = navAnimFrom + (navAnimTo - navAnimFrom) * t
 
         // Drive all three height-dependent elements from the same `count` value so
