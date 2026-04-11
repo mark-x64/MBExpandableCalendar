@@ -629,7 +629,12 @@ public final class CalendarContainerVC: UIViewController {
         switch pan.state {
         case .began:
             let v = pan.velocity(in: view)
-            calendarPanIsVertical = abs(v.y) > abs(v.x)
+            // Treat as horizontal only when we have a clear, strong horizontal
+            // signal. Otherwise default to vertical — slow/ambiguous gestures
+            // where velocity ≈ (0, 0) would otherwise be misclassified and
+            // can strand the drawer mid-drag.
+            let horizontalLock: CGFloat = 10  // pt/s; below this, signal is noise
+            calendarPanIsVertical = !(abs(v.x) > abs(v.y) && abs(v.x) > horizontalLock)
             if calendarPanIsVertical {
                 panStartOffset = scrollView.contentOffset.y
                 isDraggingCalendar = true
