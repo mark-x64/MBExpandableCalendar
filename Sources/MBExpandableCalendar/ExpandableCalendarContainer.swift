@@ -74,7 +74,7 @@ public struct ExpandableCalendarContainer<Content: View>: UIViewControllerRepres
     public var drawerShadow: DrawerShadow?
     public var referenceDate: Date
     public var initialCollapse: CGFloat
-    public var drawerBackgroundColor: UIColor = .systemGroupedBackground
+    public var drawerBackgroundColor: UIColor
     @ViewBuilder public let content: (Date) -> Content
 
     public init(
@@ -84,6 +84,7 @@ public struct ExpandableCalendarContainer<Content: View>: UIViewControllerRepres
         drawerOffset: CGFloat = 0,
         referenceDate: Date = Date(),
         initialCollapse: CGFloat = 0,
+        drawerBackgroundColor: UIColor = .systemGroupedBackground,
         @ViewBuilder content: @escaping (Date) -> Content
     ) {
         self._selectedDate = selectedDate
@@ -92,6 +93,7 @@ public struct ExpandableCalendarContainer<Content: View>: UIViewControllerRepres
         self.drawerOffset = drawerOffset
         self.referenceDate = referenceDate
         self.initialCollapse = initialCollapse
+        self.drawerBackgroundColor = drawerBackgroundColor
         self.content = content
     }
 
@@ -102,6 +104,7 @@ public struct ExpandableCalendarContainer<Content: View>: UIViewControllerRepres
         drawerOffset: CGFloat = 0,
         referenceDate: Date = Date(),
         initialCollapse: CGFloat = 0,
+        drawerBackgroundColor: UIColor = .systemGroupedBackground,
         @ViewBuilder content: @escaping (Date) -> Content
     ) {
         self._selectedDate = selectedDate
@@ -110,6 +113,7 @@ public struct ExpandableCalendarContainer<Content: View>: UIViewControllerRepres
         self.drawerOffset = drawerOffset
         self.referenceDate = referenceDate
         self.initialCollapse = initialCollapse
+        self.drawerBackgroundColor = drawerBackgroundColor
         self.content = content
     }
 
