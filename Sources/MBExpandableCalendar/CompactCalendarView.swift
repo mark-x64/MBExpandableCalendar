@@ -8,6 +8,34 @@
 
 import SwiftUI
 
+// MARK: - Observable State
+
+/// Shared, observable state for driving `CompactCalendarView` at frame rate
+/// from an external host (e.g. `ExpandableCalendarContainer`).
+///
+/// Mutating a property here invalidates only the subviews that actually read
+/// it, thanks to the iOS 17 Observation framework. This avoids the old path
+/// of reassigning `UIHostingController.rootView` on every scroll tick, which
+/// was the primary source of collapse-animation jank: each reassignment
+/// forced SwiftUI to diff the entire tree (42 cells, 7 weekday labels,
+/// 121 pager pages) and the `AnyView` wrapping defeated type-aware
+/// optimizations.
+@Observable
+@MainActor
+public final class CompactCalendarState {
+    /// 0 = fully expanded (month), 1 = fully collapsed (week). Values outside
+    /// `[0, 1]` are treated as rubber-band overscroll and drive `overscaleY`.
+    public var collapse: CGFloat = 0
+    /// When set, overrides `gridHeight`'s row count so the host can animate
+    /// height independently of `currentPage`.
+    public var rowCountOverride: CGFloat? = nil
+    /// Disables horizontal paging while the user drags the calendar vertically.
+    public var isDraggingVertically: Bool = false
+    /// Suppresses date taps during a drag to avoid accidental selection changes.
+    public var suppressTap: Bool = false
+    public init() {}
+}
+
 // MARK: - Month Rows Cache
 
 /// Reference-type cache stored in @State: mutations don't trigger SwiftUI redraws.
@@ -68,6 +96,13 @@ public struct CompactCalendarView: View {
     /// Called when the user taps a prev/next button, with the target month's row count.
     /// The container should animate its height to match (vs. the continuous-scroll path).
     public var onButtonNavigate: (@MainActor @Sendable (CGFloat) -> Void)?
+    /// When non-nil, the view reads `collapse` / `rowCountOverride` /
+    /// `isDraggingVertically` / `suppressTap` from this observable instead of
+    /// the struct fields. The host can then mutate a single class instance
+    /// per frame without reassigning `rootView`, giving SwiftUI enough type
+    /// stability to invalidate only the subviews that actually read each
+    /// property. `ExpandableCalendarContainer` uses this path.
+    public var sharedState: CompactCalendarState?
 
     public init(
         selectedDate: Binding<Date>,
@@ -79,7 +114,8 @@ public struct CompactCalendarView: View {
         referenceDate: Date = Date(),
         rowCountOverride: CGFloat? = nil,
         onContinuousRowCountChange: (@MainActor @Sendable (CGFloat) -> Void)? = nil,
-        onButtonNavigate: (@MainActor @Sendable (CGFloat) -> Void)? = nil
+        onButtonNavigate: (@MainActor @Sendable (CGFloat) -> Void)? = nil,
+        sharedState: CompactCalendarState? = nil
     ) {
         self._selectedDate = selectedDate
         self.badgeCount = badgeCount
@@ -91,6 +127,7 @@ public struct CompactCalendarView: View {
         self.rowCountOverride = rowCountOverride
         self.onContinuousRowCountChange = onContinuousRowCountChange
         self.onButtonNavigate = onButtonNavigate
+        self.sharedState = sharedState
         _baseMonth = State(initialValue: referenceDate)
     }
 
@@ -129,6 +166,19 @@ public struct CompactCalendarView: View {
             onContinuousRowCountChange?(count)
         }
     }
+
+    // MARK: Effective State Accessors
+    //
+    // These prefer `sharedState` when set, otherwise fall back to the struct
+    // fields. Reads inside `body` go through these so that per-frame mutations
+    // on `sharedState` register as fine-grained observation dependencies
+    // (iOS 17 Observation framework) — the surrounding view struct does not
+    // have to be re-initialized to propagate collapse changes.
+
+    private var effCollapse: CGFloat { sharedState?.collapse ?? collapse }
+    private var effRowCountOverride: CGFloat? { sharedState?.rowCountOverride ?? rowCountOverride }
+    private var effIsDraggingVertically: Bool { sharedState?.isDraggingVertically ?? isDraggingVertically }
+    private var effSuppressTap: Bool { sharedState?.suppressTap ?? suppressTap }
 
     // MARK: Header
 
@@ -187,7 +237,7 @@ public struct CompactCalendarView: View {
         }
         .scrollTargetBehavior(.paging)
         .scrollPosition(id: $currentPage)
-        .scrollDisabled(isDraggingVertically || effectiveCollapse > 0.99)
+        .scrollDisabled(effIsDraggingVertically || effectiveCollapse > 0.99)
         .scrollClipDisabled()
         .frame(height: gridHeight)
         .simultaneousGesture(weekSwipeGesture)
@@ -201,7 +251,7 @@ public struct CompactCalendarView: View {
 
     // MARK: Single Page
 
-    private var effectiveCollapse: CGFloat { min(max(collapse, 0), 1) }
+    private var effectiveCollapse: CGFloat { min(max(effCollapse, 0), 1) }
 
     private func page(for date: Date) -> some View {
         let rows = rowsCache.rows(for: date)
@@ -264,7 +314,7 @@ public struct CompactCalendarView: View {
                 }
             }
             .onTapGesture {
-                guard !suppressTap else { return }
+                guard !effSuppressTap else { return }
                 selectedDate = date
             }
     }
@@ -319,7 +369,7 @@ public struct CompactCalendarView: View {
     /// computes from the displayed month's actual row count.
     public var gridHeight: CGFloat {
         let ec = effectiveCollapse
-        let rows = rowCountOverride ?? CGFloat(Self.computeRowCount(for: displayDate))
+        let rows = effRowCountOverride ?? CGFloat(Self.computeRowCount(for: displayDate))
         let monthH = cellH * rows
         let weekH = cellH
         return weekH + (monthH - weekH) * (1 - ec)
@@ -331,10 +381,11 @@ public struct CompactCalendarView: View {
     }
 
     private var overscaleY: CGFloat {
-        if collapse < 0 {
-            return 1 + (-collapse) * 0.15
-        } else if collapse > 1 {
-            return 1 - (collapse - 1) * 0.15
+        let c = effCollapse
+        if c < 0 {
+            return 1 + (-c) * 0.15
+        } else if c > 1 {
+            return 1 - (c - 1) * 0.15
         }
         return 1
     }

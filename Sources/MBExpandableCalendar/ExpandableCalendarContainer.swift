@@ -136,40 +136,34 @@ public struct ExpandableCalendarContainer<Content: View>: UIViewControllerRepres
         vc.initialCollapse = initialCollapse
         vc.drawerBackgroundColor = drawerBackgroundColor
 
-        // Rebuild the factory closure with current bindings/params.
-        // navAnimTick calls this each frame to push a rowCountOverride into the
-        // SwiftUI calendar, keeping gridHeight in lockstep with mask/inset.
+        // Rebuild the factory closure with current bindings/params. The factory
+        // is invoked only when struct-identity inputs (selectedDate binding,
+        // badgeCount closure, referenceDate) change — not per scroll frame.
+        // Per-frame collapse / rowCountOverride updates go through
+        // `vc.calendarState`, which the SwiftUI view observes directly, so
+        // we no longer need to pay for a full tree rebuild every tick.
         let binding = $selectedDate
         let badgeFn = badgeCount
         let refDate = referenceDate
-        vc.makeCalendarView = { [weak vc] rowCountOverride in
+        vc.makeCalendarView = { [weak vc] in
             guard let vc = vc else { return AnyView(EmptyView()) }
-            let offset = vc.scrollView.contentOffset.y + vc.scrollView.contentInset.top
-            let cr = vc.collapseRange
-            // Allow negative values (overscroll past top) — that's what drives the
-            // rubber-band overscale effect in CompactCalendarView.overscaleY.
-            let collapse: CGFloat = cr > 0 ? min(offset / cr, 1) : 0
             return AnyView(CompactCalendarView(
                 selectedDate: binding,
                 badgeCount: badgeFn,
                 overscaleAnchor: .top,
-                collapse: collapse,
-                isDraggingVertically: vc.isDraggingCalendar,
-                suppressTap: vc.isDraggingCalendar,
                 referenceDate: refDate,
-                rowCountOverride: rowCountOverride,
                 onContinuousRowCountChange: { [weak vc] count in
                     vc?.handleContinuousRowCountChange(count)
                 },
                 onButtonNavigate: { [weak vc] count in
                     vc?.animateRowCountChange(to: count)
-                }
+                },
+                sharedState: vc.calendarState
             ))
         }
 
-        // Use the current override (non-nil while button-nav animation is running).
         if let makeView = vc.makeCalendarView {
-            vc.setCalendar(makeView(vc.navAnimRowCountOverride))
+            vc.setCalendar(makeView())
         }
         vc.setContent(AnyView(content(selectedDate)))
     }
@@ -189,20 +183,25 @@ public struct ExpandableCalendarContainer<Content: View>: UIViewControllerRepres
             guard let vc else { return }
             let offset = scrollView.contentOffset.y + scrollView.contentInset.top
             let cr = vc.collapseRange
+            // Match historical semantics: cap at 1, allow negatives (overscroll
+            // past top) so CompactCalendarView.overscaleY's rubber-band fires.
             let newCollapse: CGFloat = cr > 0 ? min(offset / cr, 1) : 0
             collapse = newCollapse
 
-            // Only rebuild the calendar view when the collapse value actually
-            // changes. Without this guard, every scroll frame past the collapse
-            // range (i.e. while scrolling the list) would still pay the cost of
-            // hc.rootView reassignment, layoutIfNeeded, and an autolayout pass —
-            // amplifying into deceleration jank and the mid-decel "reset to
-            // bottom" you saw before. Drop layoutIfNeeded too: forcing layout
-            // every frame was the loudest jank source.
-            let changed = abs(newCollapse - lastPushedCollapse) > 0.005
-            if changed && !vc.isUpdatingFromHorizontalSwipe, let makeView = vc.makeCalendarView {
-                vc.setCalendar(makeView(vc.navAnimRowCountOverride))
+            // Only push into the observable when the value actually changed so
+            // SwiftUI's registrar doesn't dirty views for no-op writes. The
+            // host no longer reassigns `hc.rootView` per frame — state
+            // mutations flow through @Observable, invalidating only the
+            // subviews that read each property.
+            if !vc.isUpdatingFromHorizontalSwipe,
+               abs(newCollapse - lastPushedCollapse) > 0.001 {
+                vc.calendarState.collapse = newCollapse
                 lastPushedCollapse = newCollapse
+                // Poke the UIHostingController so its intrinsicContentSize
+                // refreshes this frame — otherwise calendarBg (bound to
+                // hc.view.bottomAnchor) can lag one frame behind the
+                // SwiftUI-computed gridHeight.
+                vc.calendarHC?.view.invalidateIntrinsicContentSize()
             }
             vc.updateMask()
         }
@@ -259,7 +258,17 @@ public final class CalendarContainerVC: UIViewController {
 
     // ── Public ──
     let scrollView = _CalendarScrollView()
-    var cornerRadius: CGFloat = 0
+    /// Observable driver for the SwiftUI calendar. Host mutates `collapse`,
+    /// `rowCountOverride`, `isDraggingVertically`, `suppressTap` directly and
+    /// SwiftUI invalidates only the subviews that read each property, so the
+    /// calendar no longer has to be re-instantiated on every scroll tick.
+    let calendarState = CompactCalendarState()
+    var cornerRadius: CGFloat = 0 {
+        didSet {
+            guard oldValue != cornerRadius else { return }
+            maskLayer.cornerRadius = cornerRadius
+        }
+    }
     var drawerOffset: CGFloat = 0 {
         didSet {
             guard oldValue != drawerOffset, baseCalH > 0, insetConfigured else { return }
@@ -285,7 +294,10 @@ public final class CalendarContainerVC: UIViewController {
     private var contentHC: UIHostingController<AnyView>?
     private let calendarBg = UIView()
     private let scrollContainer = UIView()  // shadow host: .mask() then .shadow()
-    private let maskLayer = CAShapeLayer()
+    /// Simple CALayer used as the scroll view's mask. Using `cornerRadius` +
+    /// `maskedCorners` avoids rebuilding a `UIBezierPath` / `CGPath` on every
+    /// scroll tick; moving the mask is just a frame update.
+    private let maskLayer = CALayer()
     private var monthCalH: CGFloat = 0
     private var baseCalH: CGFloat = 0
     private var insetConfigured = false
@@ -313,7 +325,6 @@ public final class CalendarContainerVC: UIViewController {
     private var calendarPanGR: UIPanGestureRecognizer?
     private var panStartOffset: CGFloat = 0
     private var calendarPanIsVertical = false
-    var isDraggingCalendar = false
 
     // Button-navigation height animation (CADisplayLink driven)
     private var navAnimLink: CADisplayLink?
@@ -323,13 +334,11 @@ public final class CalendarContainerVC: UIViewController {
     private var navAnimCollapseFrac: CGFloat = 0
     private let navAnimDuration: CFTimeInterval = 0.42
 
-    // Factory closure set by updateUIViewController so navAnimTick can rebuild the
-    // calendar view with a rowCountOverride each frame without knowing the parameters.
-    // Signature: (rowCountOverride: CGFloat?) -> AnyView
-    var makeCalendarView: ((CGFloat?) -> AnyView)?
-    /// Currently active rowCount override – kept in sync with navAnimTick and read
-    /// by updateUIViewController / scrollViewDidScroll so they don't clobber it.
-    private(set) var navAnimRowCountOverride: CGFloat? = nil
+    // Factory closure set by updateUIViewController. Only invoked when
+    // struct-identity inputs (selectedDate binding, badgeCount, referenceDate)
+    // change — per-frame collapse / rowCountOverride updates go through
+    // `calendarState` instead, avoiding hc.rootView reassignment.
+    var makeCalendarView: (() -> AnyView)?
 
     // MARK: viewDidLoad
 
@@ -352,6 +361,13 @@ public final class CalendarContainerVC: UIViewController {
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         scrollView.alwaysBounceVertical = true
         scrollView.contentInsetAdjustmentBehavior = .never
+        // Mask: opaque black backing + rounded top corners. Rebuilding a
+        // CAShapeLayer path every frame was one of the main jank sources;
+        // a frame update on this layer is essentially free.
+        maskLayer.backgroundColor = UIColor.black.cgColor
+        maskLayer.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
+        maskLayer.masksToBounds = true
+        maskLayer.cornerRadius = cornerRadius
         scrollView.layer.mask = maskLayer
         scrollContainer.addSubview(scrollView)
 
@@ -600,27 +616,31 @@ public final class CalendarContainerVC: UIViewController {
         let calBottom = visibleCalH - collapseRange * ec + overscroll
         let r = cornerRadius
 
-        // Mask is on scrollView.layer whose coordinate system shifts by contentOffset.
-        // Add contentOffset.y to keep the mask fixed on screen at calBottom.
+        // Mask lives on scrollView.layer whose coordinate system shifts by
+        // contentOffset. Add contentOffset.y to keep the mask fixed on screen
+        // at calBottom. A CALayer frame update is ~free compared to the old
+        // per-frame UIBezierPath → cgPath rebuild.
         let maskY = calBottom + scrollView.contentOffset.y
-        let rect = CGRect(x: 0, y: maskY, width: w, height: h - calBottom + 2000)
-        let path = UIBezierPath(
-            roundedRect: rect,
-            byRoundingCorners: [.topLeft, .topRight],
-            cornerRadii: CGSize(width: r, height: r)
-        )
-        // Shadow path in container coordinates (same as view coordinates)
+        let maskFrame = CGRect(x: 0, y: maskY, width: w, height: h - calBottom + 2000)
+
+        // Shadow path still needs a CGPath. Build it via CG's direct API
+        // (avoids UIBezierPath bridging) and round all four corners — bottom
+        // corners are far below screen at `+2000` so the difference is invisible.
         let shadowRect = CGRect(x: 0, y: calBottom, width: w, height: h - calBottom + 2000)
-        let shadowPath = UIBezierPath(
+        let shadowPath = CGPath(
             roundedRect: shadowRect,
-            byRoundingCorners: [.topLeft, .topRight],
-            cornerRadii: CGSize(width: r, height: r)
+            cornerWidth: r,
+            cornerHeight: r,
+            transform: nil
         )
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        maskLayer.path = path.cgPath
-        scrollContainer.layer.shadowPath = shadowPath.cgPath
+        maskLayer.frame = maskFrame
+        if maskLayer.cornerRadius != r {
+            maskLayer.cornerRadius = r
+        }
+        scrollContainer.layer.shadowPath = shadowPath
         CATransaction.commit()
 
         // Keep scroll indicator below calendar
@@ -640,8 +660,20 @@ public final class CalendarContainerVC: UIViewController {
             let horizontalLock: CGFloat = 10  // pt/s; below this, signal is noise
             calendarPanIsVertical = !(abs(v.x) > abs(v.y) && abs(v.x) > horizontalLock)
             if calendarPanIsVertical {
+                // Kill any in-flight snap animation or deceleration from a
+                // previous release. Without this, a running
+                // setContentOffset(animated:) (e.g. from snapAfterCalendarPan)
+                // keeps writing toward its old target while `.changed` below
+                // writes the user's finger position, and the two fight each
+                // frame — the user perceives it as juddering / snapping back
+                // to the old target while they're still dragging.
+                //
+                // Unconditional: if nothing's animating this is a no-op;
+                // if something is, the assignment cancels it.
+                scrollView.setContentOffset(scrollView.contentOffset, animated: false)
                 panStartOffset = scrollView.contentOffset.y
-                isDraggingCalendar = true
+                calendarState.isDraggingVertically = true
+                calendarState.suppressTap = true
                 scrollView.delegate?.scrollViewDidScroll?(scrollView)
             }
         case .changed:
@@ -665,7 +697,8 @@ public final class CalendarContainerVC: UIViewController {
             }
         case .ended, .cancelled:
             if calendarPanIsVertical {
-                isDraggingCalendar = false
+                calendarState.isDraggingVertically = false
+                calendarState.suppressTap = false
                 snapAfterCalendarPan(velocity: pan.velocity(in: view).y)
             }
             calendarPanIsVertical = false
@@ -682,7 +715,14 @@ public final class CalendarContainerVC: UIViewController {
             scrollView.setContentOffset(CGPoint(x: 0, y: -inset), animated: true)
             return
         }
-        guard offset < collapseRange else { return }
+        // offset > collapseRange: user released the calendar in the rubber-band
+        // zone past collapsed. Because the calendar pan writes contentOffset
+        // directly (bypassing UIKit's native deceleration), UIKit will not
+        // bounce back on its own — we have to snap back to collapseRange.
+        if offset > collapseRange {
+            scrollView.setContentOffset(CGPoint(x: 0, y: collapseRange - inset), animated: true)
+            return
+        }
 
         let target: CGFloat
         if vy < -500 {
@@ -724,12 +764,7 @@ public final class CalendarContainerVC: UIViewController {
             // User swiped away — cancel button-nav animation and clear the override.
             navAnimLink?.invalidate()
             navAnimLink = nil
-            navAnimRowCountOverride = nil
-            if let makeView = makeCalendarView {
-                setCalendar(makeView(nil))
-                calendarHC?.view.invalidateIntrinsicContentSize()
-                calendarHC?.view.layoutIfNeeded()
-            }
+            calendarState.rowCountOverride = nil
         }
         let cellH = CalendarMetrics.cellHeight
         let newVisibleCalH = safeTopInset + baseCalH + newCount * cellH + drawerOffset
@@ -765,12 +800,10 @@ public final class CalendarContainerVC: UIViewController {
         navAnimTo = newCount
         navAnimStart = CACurrentMediaTime()
 
-        // Set override immediately so the SwiftUI view's gridHeight doesn't jump on
-        // the first render pass after currentPage changes (before the first tick fires).
-        navAnimRowCountOverride = navAnimFrom
-        if let makeView = makeCalendarView {
-            setCalendar(makeView(navAnimFrom))
-        }
+        // Seed the override so the SwiftUI view's gridHeight doesn't jump on
+        // the first render pass after currentPage changes (before the first
+        // tick fires). State mutation is observed by CompactCalendarView.
+        calendarState.rowCountOverride = navAnimFrom
 
         navAnimLink?.invalidate()
         let link = CADisplayLink(target: self, selector: #selector(navAnimTick))
@@ -785,21 +818,12 @@ public final class CalendarContainerVC: UIViewController {
         let cellH = CalendarMetrics.cellHeight
         let count = navAnimFrom + (navAnimTo - navAnimFrom) * t
 
-        // Drive all three height-dependent elements from the same `count` value so
-        // gridHeight (SwiftUI), calendarBg (UIKit constraint), and mask/inset all
-        // animate in perfect lockstep with no visual mismatch.
-        navAnimRowCountOverride = count
+        // Drive gridHeight (SwiftUI, via state), calendarBg (UIKit constraint
+        // on hc.view), and mask/inset from the same `count` so they stay in
+        // lockstep. No hc.rootView reassignment — state observation handles it.
+        calendarState.rowCountOverride = count
         currentInterpolatedRowCount = count
         collapseRange = max((count - 1) * cellH, 0)
-
-        // Push rowCountOverride into the SwiftUI calendar view so gridHeight follows
-        // this ease-out curve instead of jumping when displayDate changes.
-        if let makeView = makeCalendarView {
-            setCalendar(makeView(count))
-            calendarHC?.view.invalidateIntrinsicContentSize()
-            // Force UIKit to re-layout now so calendarBg tracks hc.view synchronously.
-            view.layoutIfNeeded()
-        }
 
         let newVisibleCalH = safeTopInset + baseCalH + count * cellH + drawerOffset
         isUpdatingFromHorizontalSwipe = true
@@ -807,16 +831,18 @@ public final class CalendarContainerVC: UIViewController {
         scrollView.contentOffset.y = navAnimCollapseFrac * collapseRange - newVisibleCalH
         isUpdatingFromHorizontalSwipe = false
 
+        // Kick UIHostingController so calendarBg (bound to hc.view.bottom)
+        // tracks the new intrinsic size synchronously this frame.
+        calendarHC?.view.invalidateIntrinsicContentSize()
+        view.layoutIfNeeded()
+
         updateMask()
 
         if raw >= 1.0 {
             navAnimLink?.invalidate()
             navAnimLink = nil
             // Clear the override so normal scroll-driven updates resume.
-            navAnimRowCountOverride = nil
-            if let makeView = makeCalendarView {
-                setCalendar(makeView(nil))
-            }
+            calendarState.rowCountOverride = nil
         }
     }
 }
